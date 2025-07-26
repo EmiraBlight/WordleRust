@@ -335,7 +335,7 @@ fn is_possible_match(word: &Guess, hint: &Hint) -> bool {
     }
     true
 }
-//strucs for handeling input and output of Restful API
+
 #[derive(Deserialize)]
 struct HintInput {
     word: String,
@@ -352,9 +352,7 @@ use std::fs::read_to_string;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Initialize CORS middleware
-
-    // Read SSL certificate and private key
+    
     let mut cert_file = File::open("/etc/letsencrypt/live/srv915664.hstgr.cloud/cert.pem")?;
     let mut key_file = File::open("/etc/letsencrypt/live/srv915664.hstgr.cloud/privkey.pem")?;
     let mut cert = Vec::new();
@@ -362,16 +360,14 @@ async fn main() -> std::io::Result<()> {
     cert_file.read_to_end(&mut cert)?;
     key_file.read_to_end(&mut key)?;
 
-    // Convert to OpenSSL types
+
     let cert = X509::from_pem(&cert).unwrap();
     let key = PKey::private_key_from_pem(&key).unwrap();
 
-    // Create an SSL acceptor
     let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
     builder.set_certificate(&cert).unwrap();
     builder.set_private_key(&key).unwrap();
 
-    // Start the Actix server with SSL
     HttpServer::new(|| {
         let cors = Cors::default()
             .allow_any_origin()

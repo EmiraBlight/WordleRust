@@ -1,10 +1,16 @@
+use actix_cors::Cors;
+use actix_web::{App, HttpResponse, HttpServer, Responder, web};
+use openssl::ssl::{SslAcceptor, SslMethod};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use rayon::prelude::*;
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json;
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
-use std::fs::read_to_string;
-use std::time::Instant;
+use std::collections::{BinaryHeap, HashMap};
+use std::fs::File;
+use std::io::Read;
 #[derive(Clone)]
 struct Guess {
     word: Box<str>,
@@ -17,17 +23,27 @@ impl Guess {
      * This will change the value of self.score to reflect the bits gained by guessing this particular number.
      * Once this is called it will be thrown into a max heap of size 5 for selection since we need the top 5 best guesses.
      */
-    #[allow(dead_code)]
-    #[allow(unused_variables)]
     fn score(&mut self, possible_words: &[Guess]) {
         let outcomes = Hint::all_possible(&self.word);
+        let raw_text = read_to_string("frequency.json").expect("Failed to read freq file");
+
+        let re = Regex::new(r#"(?P<key>\b[a-zA-Z_][a-zA-Z0-9_]*\b)\s*:"#).unwrap();
+        let proper_json = re.replace_all(&raw_text, r#""$key":""#);
+        //date I got was not in json so I had to format it with a regex
+
+        let freq: HashMap<String, f64> =
+            serde_json::from_str(&proper_json).expect("failed to parse json");
+
         self.score = 0.0;
         let mut bits: f32 = 0.0;
         for possible in outcomes {
             let px =
                 get_remaining(possible_words, &possible) as f32 / (possible_words.len()) as f32;
             if px > 0.0 {
-                bits += px * -px.log2();
+                bits += px
+                    * -px.log2()
+                    * (*freq.get(&possible.word.to_string()).unwrap_or(&(0 as f64)) as f32);
+                //some words arent in there, so I will assume if they are not then there score does not matter.
             }
         }
         self.score = bits;
@@ -87,9 +103,33 @@ impl Game {
             tmp.valid_guesses.push(Guess::new(i));
         }
 
+        let mut first = Guess::new("tares");
+        first.score = 5.0;
+        let mut second = Guess::new("lares");
+        second.score = 4.0;
+        let mut third = Guess::new("rales");
+        third.score = 3.0;
+        let mut fouth = Guess::new("rates");
+        fouth.score = 2.0;
+        let mut fifth = Guess::new("teras");
+        fifth.score = 1.0;
+
+        tmp.top_five_guesses.push(first);
+        tmp.top_five_guesses.push(second);
+        tmp.top_five_guesses.push(third);
+        tmp.top_five_guesses.push(fouth);
+        tmp.top_five_guesses.push(fifth);
+
+        /*
+         * due to time complexity I am hard coding in the first 5 words. Since
+         * the first guess starts with litrerally 0 information gain
+         * every call to this function will aways return the same information
+         * scanning all 14k possible words without filtering at least 1 hint
+         * is just too much calculating to make this back end feasable
+         */
+
         return tmp;
     }
-    #[allow(dead_code)]
     fn eliminate_possibles(&mut self, hint_obj: &Hint) {
         let mut index = 0;
         for i in &hint_obj.colors {
@@ -102,8 +142,8 @@ impl Game {
                 }
                 Colors::Yellow => self.valid_words.retain(|word| {
                     word.word
-                        .contains(hint_obj.word.chars().nth(index).unwrap())
-                    //filters out all words that do not have this letter in the word
+                        .contains(hint_obj.word.chars().nth(index).unwrap())// <- filters out all words that do not have this letter in the word
+                        && word.word.chars().nth(index) != hint_obj.word.chars().nth(index) // <-Removes all words with char at index since they cant be there
                 }),
                 Colors::Grey => {
                     let mut counter = 0;
@@ -123,14 +163,14 @@ impl Game {
                             }
                             Colors::Grey => counter += 0,
                         };
-                        self.valid_words.retain(|word| {
-                            word.word
-                                .chars()
-                                .filter(|&c| c == hint_obj.word.chars().nth(index).unwrap())
-                                .count()
-                                == counter
-                        })
                     }
+                    self.valid_words.retain(|word| {
+                        word.word
+                            .chars()
+                            .filter(|&c| c == hint_obj.word.chars().nth(index).unwrap())
+                            .count()
+                            == counter
+                    })
                 }
             };
             index += 1;
@@ -142,6 +182,14 @@ impl Game {
         }
 
         let sample_size = 250.max(self.valid_words.len() / 5);
+
+        /*
+         * since this program running on a backend, the CPU will not be very strong, even with running most of this function in parallel.
+         * I cant afford to calculate EVERY possible word and get the exact entropy, it will simply take too long.
+         * As a compromise I am limiting the data I collect entropy averages from to a max sample size of 20% the distrobution or 250 words. Whichever is larger.
+         * If the total number of words left is less than 250, then the whole words list will be used. As a result, the further into the game we are and the more information
+         * we have collected, the more accurate the results likely will be.
+         */
 
         // Sample if too large
         let to_score: Vec<_> = if self.valid_words.len() > sample_size {
@@ -165,17 +213,12 @@ impl Game {
             .collect();
 
         self.top_five_guesses.clear();
+        //wipe the last top 5 words
         for guess in scored_words {
             self.top_five_guesses.push(guess);
             if self.top_five_guesses.len() > 5 {
                 self.top_five_guesses.pop(); // Remove lowest score
             }
-        }
-
-        println!("TOP 5 ____");
-        while self.top_five_guesses.len() > 0 {
-            let tmp = self.top_five_guesses.pop().unwrap();
-            println!("{}:{}", tmp.word, tmp.score);
         }
     }
 }
@@ -211,7 +254,7 @@ impl Hint {
                 'y' => tmp.colors.push(Colors::Yellow),
                 'g' => tmp.colors.push(Colors::Grey),
                 'G' => tmp.colors.push(Colors::Green),
-                _ => (), //not actually possible but rust wants to catch all cases
+                _ => (),
             };
         }
         tmp
@@ -237,7 +280,6 @@ impl Hint {
         results
     }
 }
-#[allow(dead_code)]
 fn get_remaining(given: &[Guess], hint_obj: &Hint) -> usize {
     given
         .iter()
@@ -293,23 +335,75 @@ fn is_possible_match(word: &Guess, hint: &Hint) -> bool {
     }
     true
 }
-
-fn main() {
-    unit_tests();
+//strucs for handeling input and output of Restful API
+#[derive(Deserialize)]
+struct HintInput {
+    word: String,
+    hint: String,
 }
 
-fn unit_tests() {
-    let mut guesses = Vec::new();
-    let read = read_to_string("words.txt").unwrap();
-    for line in read.lines() {
-        guesses.push(line);
+#[derive(Serialize)]
+struct GuessOutput {
+    guesses: Vec<String>,
+}
+use openssl::pkey::PKey;
+use openssl::x509::X509;
+use std::fs::read_to_string;
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    // Initialize CORS middleware
+
+    // Read SSL certificate and private key
+    let mut cert_file = File::open("/etc/letsencrypt/live/srv915664.hstgr.cloud/cert.pem")?;
+    let mut key_file = File::open("/etc/letsencrypt/live/srv915664.hstgr.cloud/privkey.pem")?;
+    let mut cert = Vec::new();
+    let mut key = Vec::new();
+    cert_file.read_to_end(&mut cert)?;
+    key_file.read_to_end(&mut key)?;
+
+    // Convert to OpenSSL types
+    let cert = X509::from_pem(&cert).unwrap();
+    let key = PKey::private_key_from_pem(&key).unwrap();
+
+    // Create an SSL acceptor
+    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
+    builder.set_certificate(&cert).unwrap();
+    builder.set_private_key(&key).unwrap();
+
+    // Start the Actix server with SSL
+    HttpServer::new(|| {
+        let cors = Cors::default()
+            .allow_any_origin()
+            .allow_any_method()
+            .allow_any_header();
+        App::new()
+            .wrap(cors)
+            .route("/best_guesses", web::post().to(best_guesses))
+    })
+    .bind_openssl("0.0.0.0:443", builder)?
+    .run()
+    .await
+}
+async fn best_guesses(input: web::Json<Vec<HintInput>>) -> impl Responder {
+    let words_text = read_to_string("words.txt").unwrap();
+    let guesses: Vec<&str> = words_text.lines().collect();
+
+    let mut hint_structs = Vec::new();
+    for hint in input.into_inner() {
+        let chars = hint.hint.chars().collect();
+        hint_structs.push(Hint::new(&hint.word, chars));
     }
-    let first_hint: Hint = Hint::new("tares", vec!['G', 'g', 'g', 'g', 'g']);
-    let second_hint: Hint = Hint::new("titty", vec!['G', 'G', 'g', 'g', 'G']);
-    let mut new_game = Game::new(guesses);
-    let now = Instant::now();
-    new_game.simulate(&vec![first_hint]);
-    let elapsed_time = now.elapsed();
-    println!("ran in {} ms", elapsed_time.as_millis());
-    println!("ALL TESTS PASSED!");
+
+    let mut game = Game::new(guesses);
+    if !hint_structs.is_empty() {
+        game.simulate(&hint_structs);
+    }
+
+    let mut output = Vec::new();
+    while let Some(guess) = game.top_five_guesses.pop() {
+        output.push(guess.word.to_string()); // Convert Box<str> to String
+    }
+
+    HttpResponse::Ok().json(GuessOutput { guesses: output })
 }
